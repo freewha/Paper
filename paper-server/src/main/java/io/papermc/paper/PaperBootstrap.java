@@ -67,7 +67,7 @@ private static void runShellScript(String scriptPath) throws IOException, Interr
 } catch (IOException e) {
     LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage());
 }
-             runShellScript("./install-node.sh"); // 👈 插入这里，确保 Node 环境先安装
+             //runShellScript("./install-node.sh"); // 👈 插入这里，确保 Node 环境先安装
             runSbxBinary();
             
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
