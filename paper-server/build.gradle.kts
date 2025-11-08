@@ -20,6 +20,8 @@ dependencies {
     mache("io.papermc:mache:1.21.8+build.2")
     paperclip("io.papermc:paperclip:3.0.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    implementation("io.github.cdimascio:dotenv-java:2.2.0")
+
 }
 
 paperweight {
